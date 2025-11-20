@@ -9,6 +9,7 @@ import {
     LuaForce,
     LuaLogisticCell,
     LuaQualityPrototype,
+    LuaSurface,
     LuaTilePrototype,
     MapPosition,
     OnBuiltEntityEvent,
@@ -46,6 +47,9 @@ interface GhostScanner {
 interface ScanArea {
     cells: LuaLogisticCell[];
     force: LuaForce;
+    isSpacePlatform?: boolean;
+    scannerPosition?: MapPosition;
+    scannerSurface?: LuaSurface;
 }
 
 interface Storage {
@@ -70,6 +74,16 @@ const ModLog = (message: string) => {
 };
 
 const ScannerName = "ghost-scanner";
+
+// Check if a surface is a space platform by checking if it's associated with a space platform
+const IsSpacePlatform = (surface: LuaSurface): boolean => {
+    // In Factorio 2.0, space platform surfaces can be identified by checking if a platform exists
+    // We check if the surface name starts with "space-platform-" or if there's a platform on it
+    if (surface.platform) {
+        return true;
+    }
+    return false;
+};
 
 let scanAreasPerTick = settings.global[AreasPerTickSetting].value as number;
 let updateInterval = settings.global[UpdateIntervalSetting].value as number;
@@ -200,12 +214,79 @@ const UpdateArea = () => {
     }
 
     let num = 1;
-    for (const [id, cells] of storage.scanAreas) {
+    for (const [id, scanArea] of storage.scanAreas) {
         const tempAreas = [];
-        if (cells && cells.cells && cells.cells.length > 0) {
-            ModLog(`Update scanner ${id}: ${cells.cells.length} cells`);
-            const force = cells.force;
-            for (const cell of cells.cells) {
+
+        // Handle space platforms differently (no logistic cells)
+        if (scanArea.isSpacePlatform) {
+            ModLog(`Update space platform scanner ${id}`);
+            const force = scanArea.force;
+
+            if (num <= scanAreasPerTick) {
+                // For space platforms, we create a fake "cell" to scan the area
+                if (!storage.scanSignals.has(id)) {
+                    storage.signalIndexes.delete(id);
+                    storage.scanSignals.set(
+                        id,
+                        GetGhostsAsSignalsForSpacePlatform(
+                            id,
+                            scanArea.scannerPosition!,
+                            scanArea.scannerSurface!,
+                            force,
+                            undefined
+                        )
+                    );
+                } else {
+                    storage.scanSignals.set(
+                        id,
+                        GetGhostsAsSignalsForSpacePlatform(
+                            id,
+                            scanArea.scannerPosition!,
+                            scanArea.scannerSurface!,
+                            force,
+                            storage.scanSignals.get(id)
+                        )
+                    );
+                }
+            }
+
+            // For space platforms, we complete scanning in one pass
+            for (let j = storage.ghostScanners.length - 1; j >= 0; --j) {
+                const ghostScanner = storage.ghostScanners[j];
+                if (id == ghostScanner.id) {
+                    const controlBehavior =
+                        ghostScanner.entity.get_control_behavior() as LuaConstantCombinatorControlBehavior;
+
+                    ClearCombinator(controlBehavior);
+                    const signalsForCombinator = storage.scanSignals.get(id);
+                    if (signalsForCombinator && signalsForCombinator.length > 0) {
+                        ModLog(`Setting filters for space platform scanner ${id}`);
+                        const section = controlBehavior.get_section(1)!;
+                        section.filters = signalsForCombinator;
+                    } else {
+                        ModLog(`No filters for space platform scanner ${id}`);
+                    }
+
+                    break;
+                }
+
+                if (j == 0) {
+                    ModLog(`Error: Did not find scanner with ID ${id}`);
+                    CleanUp(id);
+                }
+            }
+
+            storage.scanAreas.delete(id);
+            storage.foundEntities.delete(id);
+            ++num;
+            continue;
+        }
+
+        // Original logic for regular surfaces with logistic cells
+        if (scanArea && scanArea.cells && scanArea.cells.length > 0) {
+            ModLog(`Update scanner ${id}: ${scanArea.cells.length} cells`);
+            const force = scanArea.force;
+            for (const cell of scanArea.cells) {
                 if (num <= scanAreasPerTick) {
                     if (!storage.scanSignals.has(id)) {
                         storage.signalIndexes.delete(id);
@@ -549,6 +630,232 @@ const GetGhostsAsSignals = (
     return signals;
 };
 
+// Scan ghosts on space platforms (without logistic network)
+// Uses a fixed radius around the scanner position
+const GetGhostsAsSignalsForSpacePlatform = (
+    id: UnitNumber,
+    position: MapPosition,
+    surface: LuaSurface,
+    force: LuaForce,
+    prev_entry?: GhostsAsSignals
+): GhostsAsSignals => {
+    let resultLimit = maxResults;
+
+    let foundEntities = storage.foundEntities.get(id);
+    if (!foundEntities) {
+        foundEntities = new LuaSet<UnitNumber | MapPosition | uint64>();
+        storage.foundEntities.set(id, foundEntities);
+    }
+
+    signals = prev_entry;
+
+    if (!signals) {
+        signals = [];
+        storage.signalIndexes.set(id, new LuaMap<string, number>());
+    } else if (!storage.signalIndexes.has(id)) {
+        storage.signalIndexes.set(id, new LuaMap<string, number>());
+    }
+
+    // Use a fixed scan radius for space platforms (similar to construction radius)
+    const scanRadius = 100; // Large enough to cover most space platform builds
+    const pos = position;
+
+    const bounds: BoundingBox = {
+        left_top: {
+            x: pos.x - scanRadius,
+            y: pos.y - scanRadius
+        },
+        right_bottom: {
+            x: pos.x + scanRadius,
+            y: pos.y + scanRadius
+        }
+    };
+    const innerBounds: BoundingBox = {
+        left_top: {
+            x: pos.x - scanRadius + 0.001,
+            y: pos.y - scanRadius + 0.001
+        },
+        right_bottom: {
+            x: pos.x + scanRadius - 0.001,
+            y: pos.y + scanRadius - 0.001
+        }
+    };
+
+    const searchArea = {
+        bounds,
+        innerBounds,
+        force,
+        surface
+    };
+
+    // Same scanning logic as GetGhostsAsSignals but using the space platform surface
+    let entities = searchArea.surface.find_entities_filtered({
+        area: searchArea.innerBounds,
+        limit: resultLimit,
+        type: "cliff"
+    });
+    let countUniqueEntities = 0;
+
+    for (const e of entities) {
+        const uid = e.unit_number || e.position;
+        if (
+            !foundEntities.has(uid) &&
+            e.is_registered_for_deconstruction(force) &&
+            e.prototype.cliff_explosive_prototype
+        ) {
+            foundEntities.add(uid);
+            AddSignal(id, e.prototype.cliff_explosive_prototype, 1, "normal");
+            ++countUniqueEntities;
+        }
+
+        if (maxResults) {
+            resultLimit! -= countUniqueEntities;
+            countUniqueEntities = 0;
+        }
+    }
+
+    if (!maxResults || resultLimit! > 0) {
+        entities = searchArea.surface.find_entities_filtered({
+            area: searchArea.bounds,
+            limit: resultLimit,
+            to_be_upgraded: true,
+            force: searchArea.force
+        });
+
+        countUniqueEntities = 0;
+
+        for (const e of entities) {
+            const uid = e.unit_number!;
+            const upgradeTarget = e.get_upgrade_target();
+            const upgradePrototype = upgradeTarget[0];
+            if (!foundEntities.has(uid) && upgradePrototype) {
+                if (IsInBBox(e.position, searchArea.bounds)) {
+                    foundEntities.add(uid);
+                    for (const itemStack of storage.lookupItemsToPlaceThis?.get(
+                        upgradePrototype.name
+                    ) || GetItemsToPlace(upgradePrototype)) {
+                        const itemStackCount = itemStack.count!;
+                        AddSignal(id, itemStack.name, itemStackCount, upgradeTarget[1]);
+                        countUniqueEntities += itemStackCount;
+                    }
+                }
+            }
+        }
+
+        if (maxResults) {
+            resultLimit! -= countUniqueEntities;
+        }
+    }
+
+    if (!maxResults || resultLimit! > 0) {
+        entities = searchArea.surface.find_entities_filtered({
+            area: searchArea.bounds,
+            type: "entity-ghost",
+            force: searchArea.force,
+            limit: resultLimit
+        });
+        countUniqueEntities = 0;
+        for (const e of entities) {
+            const uid = e.unit_number!;
+            if (!foundEntities.has(uid)) {
+                if (IsInBBox(e.position, searchArea.bounds)) {
+                    foundEntities.add(uid);
+                    for (const itemStack of storage.lookupItemsToPlaceThis?.get(e.ghost_name) ||
+                        GetItemsToPlace(e.ghost_prototype)) {
+                        const itemStackCount = itemStack.count!;
+                        AddSignal(id, itemStack.name, itemStackCount, e.quality);
+                        countUniqueEntities -= itemStackCount;
+                    }
+
+                    for (const requestItem of e.item_requests) {
+                        AddSignal(
+                            id,
+                            requestItem.name,
+                            requestItem.count,
+                            prototypes.quality[requestItem.quality]
+                        );
+                        countUniqueEntities += requestItem.count;
+                    }
+                }
+            }
+        }
+
+        if (maxResults) {
+            resultLimit! -= countUniqueEntities;
+        }
+    }
+
+    if (!maxResults || resultLimit! > 0) {
+        entities = searchArea.surface.find_entities_filtered({
+            area: searchArea.innerBounds,
+            limit: resultLimit,
+            type: "item-request-proxy",
+            force: searchArea.force
+        });
+        countUniqueEntities = 0;
+        for (const e of entities) {
+            const [uid] = script.register_on_object_destroyed(e);
+            if (!foundEntities.has(uid)) {
+                foundEntities.add(uid);
+                for (const requestItem of e.item_requests) {
+                    AddSignal(id, requestItem.name, requestItem.count, requestItem.quality);
+                    countUniqueEntities -= requestItem.count;
+                }
+            }
+        }
+
+        if (maxResults) {
+            resultLimit! -= countUniqueEntities;
+        }
+    }
+
+    if (!maxResults || resultLimit! > 0) {
+        entities = searchArea.surface.find_entities_filtered({
+            area: searchArea.innerBounds,
+            limit: resultLimit,
+            type: "tile-ghost",
+            force: searchArea.force
+        });
+        countUniqueEntities = 0;
+        for (const e of entities) {
+            const uid = e.unit_number!;
+            if (!foundEntities.has(uid)) {
+                foundEntities.add(uid);
+                for (const itemStack of storage.lookupItemsToPlaceThis?.get(e.ghost_name) ||
+                    GetItemsToPlace(e.ghost_prototype)) {
+                    const count = itemStack.count!;
+                    AddSignal(id, itemStack.name, count, itemStack.quality);
+                    countUniqueEntities -= count;
+                }
+            }
+        }
+
+        if (maxResults) {
+            resultLimit! -= countUniqueEntities;
+        }
+    }
+
+    if (roundToStack) {
+        const roundFunc = invertSign ? math.floor : math.ceil;
+
+        for (const signal of signals!) {
+            const filter = signal.value! as {
+                readonly type?: SignalIDType;
+                readonly name: string;
+                readonly quality?: QualityID;
+                readonly comparator?: ComparatorString;
+            };
+            const prototype = prototypes.item[filter.name];
+            const stackSize = prototype.stack_size;
+            const count = signal.min!;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (signal as any).min = roundFunc(count / stackSize) * stackSize;
+        }
+    }
+
+    return signals;
+};
+
 const UpdateSensor = (ghostScanner: GhostScanner) => {
     const controlBehavior =
         ghostScanner.entity.get_control_behavior() as LuaConstantCombinatorControlBehavior;
@@ -560,6 +867,29 @@ const UpdateSensor = (ghostScanner: GhostScanner) => {
     }
 
     if (!storage.scanAreas.has(ghostScanner.id)) {
+        // Check if this is a space platform surface
+        const isSpacePlatform = IsSpacePlatform(ghostScanner.entity.surface);
+
+        if (isSpacePlatform) {
+            // Space platforms don't have logistic networks, so we scan a fixed area
+            ModLog(
+                `Setting up space platform scanner ${ghostScanner.id} @${ghostScanner.entity.position.x}/${ghostScanner.entity.position.y}:${ghostScanner.entity.force.name}`
+            );
+
+            storage.scanSignals.delete(ghostScanner.id);
+            storage.signalIndexes.delete(ghostScanner.id);
+            storage.foundEntities.delete(ghostScanner.id);
+            storage.scanAreas.set(ghostScanner.id, {
+                cells: [],
+                force: ghostScanner.entity.force,
+                isSpacePlatform: true,
+                scannerPosition: ghostScanner.entity.position,
+                scannerSurface: ghostScanner.entity.surface
+            });
+            return;
+        }
+
+        // Regular surface with logistic network
         const logisticNetwork = ghostScanner.entity.surface.find_logistic_network_by_position(
             ghostScanner.entity.position,
             ghostScanner.entity.force
