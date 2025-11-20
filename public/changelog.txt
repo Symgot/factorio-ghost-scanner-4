@@ -1,4 +1,14 @@
 ---------------------------------------------------------------------------------------------------
+Version: 4.0.6
+Date: 2025-11-20
+  Features:
+    - Added Space Age compatibility: Ghost scanners now work on space platforms
+    - Space platform scanners scan a 100-tile radius around the scanner (no logistic network required)
+    - Added flib as optional dependency for future enhancements
+  Changes:
+    - Updated dependencies to include optional Space Age and flib support
+    - Added Factorio Modding Toolkit configuration for development
+---------------------------------------------------------------------------------------------------
 Version: 4.0.5
 Date: 2025-01-15
   Bugfixes:
