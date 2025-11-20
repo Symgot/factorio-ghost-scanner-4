@@ -54,10 +54,7 @@ interface Storage {
     scanSignals: LuaMap<UnitNumber, LogisticFilterWrite[]>;
     signalIndexes: LuaMap<UnitNumber, LuaMap<string, number>>;
     scanAreas: LuaMap<UnitNumber, ScanArea>;
-    foundEntities: LuaMap<
-        UnitNumber,
-        LuaSet<UnitNumber | MapPosition | LuaMultiReturn<[uint64, uint64, defines.target_type]>>
-    >;
+    foundEntities: LuaMap<UnitNumber, LuaSet<UnitNumber | MapPosition | uint64>>;
     updateTimeout: boolean;
     updateIndex: number;
     initMod: boolean;
@@ -337,9 +334,7 @@ const GetGhostsAsSignals = (
 
     let foundEntities = storage.foundEntities.get(id);
     if (!foundEntities) {
-        foundEntities = new LuaSet<
-            UnitNumber | MapPosition | LuaMultiReturn<[uint64, uint64, defines.target_type]>
-        >();
+        foundEntities = new LuaSet<UnitNumber | MapPosition | uint64>();
         storage.foundEntities.set(id, foundEntities);
     }
 
@@ -492,7 +487,7 @@ const GetGhostsAsSignals = (
         });
         countUniqueEntities = 0;
         for (const e of entities) {
-            const uid = script.register_on_object_destroyed(e);
+            const [uid] = script.register_on_object_destroyed(e);
             if (!foundEntities.has(uid)) {
                 foundEntities.add(uid);
                 for (const requestItem of e.item_requests) {
